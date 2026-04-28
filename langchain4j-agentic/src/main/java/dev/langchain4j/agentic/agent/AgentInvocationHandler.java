@@ -169,15 +169,21 @@ public class AgentInvocationHandler implements InvocationHandler, InternalAgent 
             LangChain4jManaged.setCurrent(Map.of(AgenticScope.class, ephemeralAgenticScope()));
         }
         try {
-            beforeAgentInvocation(agentListener, agenticScope, this, namedArgs);
+            if (namedArgs != null) {
+                beforeAgentInvocation(agentListener, agenticScope, this, namedArgs);
+            }
             Object result = method.invoke(agent, args);
-            afterAgentInvocation(agentListener, agenticScope, this, namedArgs, result);
+            if (namedArgs != null) {
+                afterAgentInvocation(agentListener, agenticScope, this, namedArgs, result);
+            }
 
             return result;
         } catch (Exception e) {
             AgentInvocationException invocationException =
                     new AgentInvocationException("Failed to invoke agent method: " + method, e);
-            agentError(agentListener, agenticScope, this, namedArgs, invocationException);
+            if (namedArgs != null) {
+                agentError(agentListener, agenticScope, this, namedArgs, invocationException);
+            }
             throw invocationException;
         } finally {
             if (agenticScope == null) {

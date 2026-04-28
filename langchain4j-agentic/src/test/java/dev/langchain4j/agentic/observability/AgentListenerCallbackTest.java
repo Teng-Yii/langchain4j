@@ -6,6 +6,7 @@ import dev.langchain4j.agent.tool.Tool;
 import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import dev.langchain4j.agentic.Agent;
 import dev.langchain4j.agentic.AgenticServices;
+import dev.langchain4j.agentic.UntypedAgent;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.model.chat.ChatModel;
 import dev.langchain4j.model.chat.request.ChatRequest;
@@ -13,7 +14,9 @@ import dev.langchain4j.model.chat.response.ChatResponse;
 import dev.langchain4j.service.UserMessage;
 import dev.langchain4j.service.V;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.junit.jupiter.api.Test;
 
@@ -22,7 +25,7 @@ import org.junit.jupiter.api.Test;
  *
  * <p>
  * Verifies that beforeAgentInvocation and afterAgentInvocation callbacks
- * are triggered when Agent is invoked directly (non-Planner mode).
+ * are triggered correctly both in standalone mode and as part of an agentic system.
  * </p>
  */
 class AgentListenerCallbackTest {
@@ -138,12 +141,11 @@ class AgentListenerCallbackTest {
     }
 
     /**
-     * Test: Bug reproduction - Verify that AgentListener callbacks are NOT triggered when Agent is invoked directly
-     * This test reproduces the bug where beforeAgentInvocation and afterAgentInvocation callbacks
-     * are not called in AgentInvocationHandler
+     * Test: Verify that AgentListener callbacks are triggered when Agent is invoked
+     * in standalone mode (outside of an agentic system).
      */
     @Test
-    void testAgentListenerCallbacksNotCalledBug() {
+    void testAgentListenerCallbacksCalledInStandaloneMode() {
         // Given: Create Agent with listener
         MockToolCallingChatModel mockChatModel = new MockToolCallingChatModel("toUpperCase");
         TestAgentListener listener = new TestAgentListener();
@@ -157,7 +159,7 @@ class AgentListenerCallbackTest {
         // When: Invoke Agent method directly
         agent.execute("hello");
 
-        // Then: Verify tool callbacks are triggered (these work correctly)
+        // Then: Verify tool callbacks are triggered
         assertThat(listener.getBeforeToolExecutionCalled().get())
                 .as("beforeAgentToolExecution should be called")
                 .isTrue();
@@ -166,16 +168,93 @@ class AgentListenerCallbackTest {
                 .as("afterAgentToolExecution should be called")
                 .isTrue();
 
-        // Then: Verify Agent invocation callbacks are NOT triggered (this demonstrates the bug)
-        // These assertions will fail until the bug is fixed
+        // Then: Verify Agent invocation callbacks ARE triggered in standalone mode
         assertThat(listener.getBeforeInvocationCalled().get())
-                .as("beforeAgentInvocation should be called but is not (BUG)")
+                .as("beforeAgentInvocation should be called in standalone mode")
                 .isTrue();
 
         assertThat(listener.getAfterInvocationCalled().get())
-                .as("afterAgentInvocation should be called but is not (BUG)")
+                .as("afterAgentInvocation should be called in standalone mode")
                 .isTrue();
 
-        System.out.println("Bug reproduction test completed");
+        System.out.println("Standalone mode callback test completed");
+    }
+
+    /**
+     * Test: Verify that AgentListener callbacks are NOT triggered twice when Agent is invoked
+     * as part of an agentic system (non-standalone mode).
+     *
+     * <p>
+     * When an agent is used as a subagent inside a sequence (or any other agentic system),
+     * the AgentInvoker is already responsible for calling beforeAgentInvocation and
+     * afterAgentInvocation. The AgentInvocationHandler must NOT call them again, otherwise
+     * the listener would be invoked twice per agent execution.
+     * </p>
+     */
+    @Test
+    void testAgentListenerCallbacksNotDuplicatedInAgenticSystem() {
+        // Given: Create Agent with a counting listener using inheritedBySubagents=true
+        MockToolCallingChatModel mockChatModel = new MockToolCallingChatModel("toUpperCase");
+
+        AtomicInteger beforeInvocationCount = new AtomicInteger(0);
+        AtomicInteger afterInvocationCount = new AtomicInteger(0);
+
+        AgentListener countingListener = new AgentListener() {
+            @Override
+            public void beforeAgentInvocation(AgentRequest agentRequest) {
+                // Only count callbacks for the sub-agent (SimpleTestAgent), not for the sequence itself
+                if (agentRequest.agentName().equals("execute")) {
+                    beforeInvocationCount.incrementAndGet();
+                    System.out.println("[CountingListener] beforeAgentInvocation count="
+                            + beforeInvocationCount.get()
+                            + " agent=" + agentRequest.agentName());
+                }
+            }
+
+            @Override
+            public void afterAgentInvocation(AgentResponse agentResponse) {
+                // Only count callbacks for the sub-agent (SimpleTestAgent), not for the sequence itself
+                if (agentResponse.agentName().equals("execute")) {
+                    afterInvocationCount.incrementAndGet();
+                    System.out.println("[CountingListener] afterAgentInvocation count="
+                            + afterInvocationCount.get()
+                            + " agent=" + agentResponse.agentName());
+                }
+            }
+
+            @Override
+            public boolean inheritedBySubagents() {
+                // Listener is registered on the sequence and inherited by sub-agents,
+                // so it will be propagated to SimpleTestAgent via AgentInvoker
+                return true;
+            }
+        };
+
+        SimpleTestAgent subAgent = AgenticServices.agentBuilder(SimpleTestAgent.class)
+                .chatModel(mockChatModel)
+                .tools(new TestTool())
+                .build();
+
+        // Build a sequence with SimpleTestAgent as sub-agent, register the counting listener on the sequence
+        UntypedAgent sequence = AgenticServices.sequenceBuilder()
+                .subAgents(subAgent)
+                .listener(countingListener)
+                .outputKey("result")
+                .build();
+
+        // When: Invoke the agentic system (sequence invokes the sub-agent internally)
+        sequence.invoke(Map.of("input", "hello"));
+
+        // Then: Verify that beforeAgentInvocation was called exactly ONCE for the sub-agent
+        // (called by AgentInvoker, NOT duplicated by AgentInvocationHandler)
+        assertThat(beforeInvocationCount.get())
+                .as("beforeAgentInvocation should be called exactly once for the sub-agent, not twice")
+                .isEqualTo(1);
+
+        assertThat(afterInvocationCount.get())
+                .as("afterAgentInvocation should be called exactly once for the sub-agent, not twice")
+                .isEqualTo(1);
+
+        System.out.println("Agentic system no-duplication test completed");
     }
 }
